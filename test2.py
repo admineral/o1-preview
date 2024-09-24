@@ -3,6 +3,7 @@ import os
 import time
 import json
 import base64
+import re
 
 # Use environment variable if available, otherwise use hardcoded API key
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -11,6 +12,31 @@ if not OPENAI_API_KEY:
 
 # Initialize the OpenAI client
 client = OpenAI()
+
+def parse_ai_response(raw_response):
+    try:
+        # First, try to parse the entire response as JSON
+        return json.loads(raw_response)
+    except json.JSONDecodeError:
+        # If that fails, try to extract JSON from a code block
+        json_match = re.search(r'```json\n(.*?)\n```', raw_response, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group(1))
+            except json.JSONDecodeError:
+                pass
+        
+        # If JSON parsing fails, create a structured response
+        return {
+            "thought": "Unable to parse JSON. Using raw response.",
+            "plan": [
+                {
+                    "step": 1,
+                    "description": "Execute the following code",
+                    "code": raw_response
+                }
+            ]
+        }
 
 def test_o1_model(prompt, feedback=None):
     try:
@@ -69,42 +95,16 @@ def test_o1_model(prompt, feedback=None):
         
         end_time = time.time()
         
-        # Extract the response content and parse JSON
         raw_answer = response.choices[0].message.content
-        try:
-            # First, try to parse the raw answer directly
-            parsed_answer = json.loads(raw_answer)
-        except json.JSONDecodeError:
-            # If that fails, try to extract JSON from a code block
-            import re
-            json_match = re.search(r'```json\n(.*?)\n```', raw_answer, re.DOTALL)
-            if json_match:
-                try:
-                    parsed_answer = json.loads(json_match.group(1))
-                except json.JSONDecodeError:
-                    print("Failed to parse JSON from code block. Raw response:")
-                    print(raw_answer)
-                    parsed_answer = {"thought": "", "plan": []}
-            else:
-                print("Failed to parse JSON. Raw response:")
-                print(raw_answer)
-                parsed_answer = {"thought": "", "plan": []}
-        
-        # Extract usage information
-        total_tokens = response.usage.total_tokens
-        prompt_tokens = response.usage.prompt_tokens
-        completion_tokens = response.usage.completion_tokens
-        
-        # Calculate elapsed time
-        elapsed_time = end_time - start_time
+        parsed_answer = parse_ai_response(raw_answer)
         
         return {
             "raw_response": raw_answer,
             "parsed_answer": parsed_answer,
-            "total_tokens": total_tokens,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "elapsed_time": elapsed_time
+            "total_tokens": response.usage.total_tokens,
+            "prompt_tokens": response.usage.prompt_tokens,
+            "completion_tokens": response.usage.completion_tokens,
+            "elapsed_time": end_time - start_time
         }
     
     except Exception as e:
@@ -149,8 +149,10 @@ def save_image(image_data, filename):
 # Test the model with a prompt to analyze the CSV files
 sample_prompt = "Analyze the sales and price trends for the top 5 products by total sales volume. Create line charts to visualize the trends over time."
 
+num_iterations = 2  # Make this configurable
 feedback = None
-for iteration in range(2):  # Run two iterations to demonstrate feedback loop
+
+for iteration in range(num_iterations):
     print(f"\n{'='*50}\nIteration {iteration + 1}\n{'='*50}")
     
     result = test_o1_model(sample_prompt, feedback)
@@ -172,27 +174,28 @@ for iteration in range(2):  # Run two iterations to demonstrate feedback loop
         thread = client.beta.threads.create()
         
         for step in parsed_answer.get('plan', []):
-            print(f"\nStep {step['step']}: {step['description']}")
+            print(f"\nStep {step.get('step', 'N/A')}: {step.get('description', 'No description')}")
             print("Code:")
             print("-"*20)
-            print(step['code'])
+            print(step.get('code', 'No code provided'))
             print("-"*20)
             
-            print("\nExecuting code with 4o model:")
-            execution_result = execute_4o_code_interpreter(thread.id, step['description'], step['code'])
-            
-            for content in execution_result:
-                if content.type == 'text':
-                    print(content.text.value)
-                elif content.type == 'image_file':
-                    try:
-                        image_file = client.files.content(content.image_file.file_id)
-                        image_data = image_file.read()
-                        save_image(image_data, f"image_{content.image_file.file_id}.png")
-                    except Exception as e:
-                        print(f"Error saving image: {str(e)}")
-                    
-            execution_results.append(str(execution_result))  # Convert to string for feedback
+            if step.get('code'):
+                print("\nExecuting code with 4o model:")
+                execution_result = execute_4o_code_interpreter(thread.id, step['description'], step['code'])
+                
+                for content in execution_result:
+                    if content.type == 'text':
+                        print(content.text.value)
+                    elif content.type == 'image_file':
+                        try:
+                            image_file = client.files.content(content.image_file.file_id)
+                            image_data = image_file.read()
+                            save_image(image_data, f"image_{content.image_file.file_id}.png")
+                        except Exception as e:
+                            print(f"Error saving image: {str(e)}")
+                
+                execution_results.append(str(execution_result))
         
         # Prepare feedback for the next iteration
         feedback = {
